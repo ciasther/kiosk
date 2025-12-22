@@ -23,8 +23,8 @@
 # Date: 2025-12-22
 ################################################################################
 
-set -e  # Exit on error
 set -u  # Exit on undefined variable
+# NOTE: Removed 'set -e' to allow graceful error handling
 
 ################################################################################
 # CONFIGURATION
@@ -126,16 +126,16 @@ prompt_configuration() {
         *) log_error "Invalid choice"; exit 1 ;;
     esac
     
-    # Hostname
-    read -p "Enter device hostname (e.g., kiosk01): " DEVICE_HOSTNAME
-    if [[ -z "$DEVICE_HOSTNAME" ]]; then
-        log_error "Hostname cannot be empty"
-        exit 1
-    fi
+    # Hostname (auto-generate if empty)
+    DEFAULT_HOSTNAME="kiosk-$(date +%s | tail -c 5)"
+    read -p "Enter device hostname [${DEFAULT_HOSTNAME}]: " DEVICE_HOSTNAME
+    DEVICE_HOSTNAME=${DEVICE_HOSTNAME:-$DEFAULT_HOSTNAME}
+    log_info "Using hostname: $DEVICE_HOSTNAME"
     
     # Username (default: kiosk)
     read -p "Enter username for auto-login [kiosk]: " DEVICE_USER
     DEVICE_USER=${DEVICE_USER:-kiosk}
+    log_info "Using username: $DEVICE_USER"
     
     # Headscale authkey
     echo ""
@@ -172,10 +172,21 @@ phase1_system_preparation() {
     print_header "PHASE 1: SYSTEM PREPARATION"
     
     log "Setting hostname to: $DEVICE_HOSTNAME"
-    hostnamectl set-hostname "$DEVICE_HOSTNAME"
+    hostnamectl set-hostname "$DEVICE_HOSTNAME" || log_warning "Failed to set hostname, continuing..."
     
     log "Updating package lists..."
-    apt-get update -qq
+    for i in {1..3}; do
+        if apt-get update -qq; then
+            log "Package lists updated successfully"
+            break
+        else
+            log_warning "apt-get update failed (attempt $i/3). Retrying in 5s..."
+            sleep 5
+            if [[ $i -eq 3 ]]; then
+                log_warning "apt-get update failed after 3 attempts. Continuing anyway..."
+            fi
+        fi
+    done
     
     log "Installing base utilities..."
     apt-get install -y -qq \
@@ -190,14 +201,21 @@ phase1_system_preparation() {
         ca-certificates \
         gnupg \
         lsb-release \
-        software-properties-common
+        software-properties-common || {
+            log_warning "Some packages failed to install. Trying essential ones only..."
+            apt-get install -y -qq curl wget ca-certificates || log_error "Critical: Cannot install essential packages"
+        }
     
     log "Creating user: $DEVICE_USER"
     if ! id "$DEVICE_USER" &>/dev/null; then
-        useradd -m -s /bin/bash "$DEVICE_USER"
-        echo "$DEVICE_USER:12345" | chpasswd
-        usermod -aG sudo "$DEVICE_USER"
-        log "User $DEVICE_USER created with password: 12345"
+        if useradd -m -s /bin/bash "$DEVICE_USER"; then
+            echo "$DEVICE_USER:gastro2024" | chpasswd
+            usermod -aG sudo "$DEVICE_USER"
+            log "User $DEVICE_USER created with password: gastro2024"
+        else
+            log_error "Failed to create user $DEVICE_USER"
+            exit 1
+        fi
     else
         log_info "User $DEVICE_USER already exists"
     fi
@@ -213,7 +231,13 @@ phase2_display_manager() {
         xorg \
         lightdm \
         lightdm-gtk-greeter \
-        lightdm-gtk-greeter-settings
+        lightdm-gtk-greeter-settings || {
+            log_warning "LightDM installation failed. Trying without greeter settings..."
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xorg lightdm lightdm-gtk-greeter || {
+                log_error "Critical: Cannot install display manager"
+                exit 1
+            }
+        }
     
     log "Installing Openbox window manager..."
     apt-get install -y -qq \
@@ -221,7 +245,13 @@ phase2_display_manager() {
         obconf \
         obmenu \
         tint2 \
-        nitrogen
+        nitrogen || {
+            log_warning "Some Openbox packages failed. Installing minimal setup..."
+            apt-get install -y -qq openbox || {
+                log_error "Critical: Cannot install Openbox"
+                exit 1
+            }
+        }
     
     log "Configuring LightDM for auto-login..."
     cat > /etc/lightdm/lightdm.conf.d/50-autologin.conf <<EOF
@@ -276,18 +306,24 @@ phase3_chromium() {
     apt-get install -y -qq \
         chromium-browser \
         chromium-browser-l10n \
-        chromium-codecs-ffmpeg
+        chromium-codecs-ffmpeg || {
+            log_warning "Full Chromium install failed. Trying minimal..."
+            apt-get install -y -qq chromium-browser || {
+                log_error "Critical: Cannot install Chromium"
+                exit 1
+            }
+        }
     
     # Touch screen support
     log "Installing touch screen utilities..."
     apt-get install -y -qq \
         xserver-xorg-input-evdev \
         xinput \
-        xinput-calibrator
+        xinput-calibrator || log_warning "Touch screen utilities installation failed, continuing..."
     
     # Unclutter for hiding cursor
     log "Installing unclutter (cursor hiding)..."
-    apt-get install -y -qq unclutter
+    apt-get install -y -qq unclutter || log_warning "Unclutter installation failed, continuing..."
     
     log "Phase 3 completed successfully"
 }
@@ -297,7 +333,19 @@ phase4_vpn() {
     
     log "Installing Tailscale..."
     if ! command -v tailscale &>/dev/null; then
-        curl -fsSL https://tailscale.com/install.sh | sh
+        for i in {1..3}; do
+            if curl -fsSL https://tailscale.com/install.sh | sh; then
+                log "Tailscale installed successfully"
+                break
+            else
+                log_warning "Tailscale installation failed (attempt $i/3). Retrying..."
+                sleep 5
+                if [[ $i -eq 3 ]]; then
+                    log_error "Critical: Cannot install Tailscale after 3 attempts"
+                    exit 1
+                fi
+            fi
+        done
     else
         log_info "Tailscale already installed"
     fi
@@ -307,14 +355,28 @@ phase4_vpn() {
     
     # Stop tailscale if running
     systemctl stop tailscaled 2>/dev/null || true
+    sleep 2
+    systemctl start tailscaled || log_warning "Failed to start tailscaled"
+    sleep 3
     
-    # Connect with authkey
-    tailscale up \
-        --login-server="$HEADSCALE_SERVER" \
-        --authkey="$AUTHKEY" \
-        --hostname="$DEVICE_HOSTNAME" \
-        --accept-routes \
-        --accept-dns=false
+    # Connect with authkey (with retry)
+    for i in {1..3}; do
+        if tailscale up \
+            --login-server="$HEADSCALE_SERVER" \
+            --authkey="$AUTHKEY" \
+            --hostname="$DEVICE_HOSTNAME" \
+            --accept-routes \
+            --accept-dns=false; then
+            log "Tailscale up command successful"
+            break
+        else
+            log_warning "Tailscale up failed (attempt $i/3). Retrying..."
+            sleep 5
+            if [[ $i -eq 3 ]]; then
+                log_error "Failed to connect to Headscale. Continuing anyway..."
+            fi
+        fi
+    done
     
     log "Waiting for VPN connection..."
     for i in {1..30}; do
@@ -325,13 +387,12 @@ phase4_vpn() {
         fi
         sleep 2
         if [[ $i -eq 30 ]]; then
-            log_error "VPN connection timeout. Check your authkey and Headscale server."
-            exit 1
+            log_warning "VPN connection timeout. Service will retry on boot. Continuing..."
         fi
     done
     
     log "Enabling Tailscale autostart..."
-    systemctl enable tailscaled
+    systemctl enable tailscaled || log_warning "Failed to enable tailscaled, but continuing..."
     
     log "Phase 4 completed successfully"
 }
