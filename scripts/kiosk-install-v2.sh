@@ -32,7 +32,7 @@ set -u  # Exit on undefined variable
 
 # Server configuration
 readonly SERVER_IP="100.64.0.7"
-readonly SERVER_PORT="3001"
+SERVER_PORT="3001"  # Not readonly - will be set based on device role
 readonly DEVICE_MANAGER_URL="http://${SERVER_IP}:8090"
 readonly BACKEND_URL="https://${SERVER_IP}:3000"
 
@@ -195,9 +195,9 @@ phase1_system_preparation() {
     log "Creating user: $DEVICE_USER"
     if ! id "$DEVICE_USER" &>/dev/null; then
         useradd -m -s /bin/bash "$DEVICE_USER"
-        echo "$DEVICE_USER:12345" | chpasswd
+        echo "$DEVICE_USER:gastro2024" | chpasswd
         usermod -aG sudo "$DEVICE_USER"
-        log "User $DEVICE_USER created with password: 12345"
+        log "User $DEVICE_USER created with password: gastro2024"
     else
         log_info "User $DEVICE_USER already exists"
     fi
