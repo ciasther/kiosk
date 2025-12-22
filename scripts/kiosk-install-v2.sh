@@ -219,9 +219,9 @@ phase1_system_preparation() {
     log "Creating user: $DEVICE_USER"
     if ! id "$DEVICE_USER" &>/dev/null; then
         if useradd -m -s /bin/bash "$DEVICE_USER"; then
-            echo "$DEVICE_USER:gastro2024" | chpasswd
+            echo "$DEVICE_USER:12345" | chpasswd
             usermod -aG sudo "$DEVICE_USER"
-            log "User $DEVICE_USER created with password: gastro2024"
+            log "User $DEVICE_USER created with password: 12345"
         else
             log_error "Failed to create user $DEVICE_USER"
             exit 1
