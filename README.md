@@ -3,4 +3,7 @@ aplikacja kiosków samoobsługowych dla gastronomii / restauracji
 
 
 Instalacja:
-wget -O - https://raw.githubusercontent.com/ciasther/kiosk/main/kiosk-install.sh | sudo bash
+
+<code>wget -O - https://raw.githubusercontent.com/ciasther/kiosk/main/test-install.sh | sudo bash</code>
+
+<code>wget -O - https://raw.githubusercontent.com/ciasther/kiosk/main/kiosk-install.sh | sudo bash</code>
