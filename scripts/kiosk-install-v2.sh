@@ -37,7 +37,7 @@ readonly DEVICE_MANAGER_URL="http://${SERVER_IP}:8090"
 readonly BACKEND_URL="https://${SERVER_IP}:3000"
 
 # Headscale/Tailscale configuration
-readonly HEADSCALE_SERVER="https://headscale.your-domain.com"
+readonly HEADSCALE_SERVER="http://89.72.39.90:32654"
 readonly AUTHKEY_PLACEHOLDER="YOUR_AUTHKEY_HERE"
 
 # Device configuration
@@ -173,6 +173,16 @@ phase1_system_preparation() {
     
     log "Setting hostname to: $DEVICE_HOSTNAME"
     hostnamectl set-hostname "$DEVICE_HOSTNAME" || log_warning "Failed to set hostname, continuing..."
+    
+    # Fix broken Surface Linux repository (if exists)
+    if [ -f /etc/apt/sources.list.d/surfacelinux.list ]; then
+        log "Detected Surface device - fixing repository configuration..."
+        # Backup original
+        cp /etc/apt/sources.list.d/surfacelinux.list /etc/apt/sources.list.d/surfacelinux.list.backup 2>/dev/null || true
+        # Disable broken repo
+        sed -i 's/^deb/#deb/g' /etc/apt/sources.list.d/surfacelinux.list || true
+        log "Surface repository disabled to prevent apt errors"
+    fi
     
     log "Updating package lists..."
     for i in {1..3}; do
