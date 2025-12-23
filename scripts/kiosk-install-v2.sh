@@ -601,6 +601,40 @@ phase6_heartbeat_services() {
 }
 
 install_printer_service() {
+    log "Installing system dependencies for printer..."
+    apt-get install -y -qq \
+        python3-pip \
+        python3-pil \
+        libusb-1.0-0 \
+        python3-usb \
+        fonts-dejavu-core || {
+            log_error "Failed to install printer dependencies"
+            return 1
+        }
+    
+    log "Installing Python modules for ESC/POS printer..."
+    pip3 install --break-system-packages python-escpos pillow 2>/dev/null || {
+        log_warning "pip3 install with --break-system-packages failed, trying without..."
+        pip3 install python-escpos pillow || {
+            log_error "Failed to install Python modules"
+            return 1
+        }
+    }
+    
+    log "Adding user $DEVICE_USER to printer groups..."
+    usermod -a -G lp,dialout $DEVICE_USER
+    
+    log "Disabling CUPS (conflicts with direct USB printing)..."
+    systemctl stop cups cups.socket cups.path cups-browsed 2>/dev/null || true
+    systemctl disable cups cups.socket cups.path cups-browsed 2>/dev/null || true
+    systemctl mask cups 2>/dev/null || true  # Prevent auto-start after reboot
+    
+    log "Blacklisting usblp module..."
+    cat > /etc/modprobe.d/blacklist-usblp.conf <<EOF
+# Disable usblp kernel module for direct ESC/POS printing
+blacklist usblp
+EOF
+    
     log "Installing Node.js..."
     if ! command -v node &>/dev/null; then
         curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -611,46 +645,320 @@ install_printer_service() {
     PRINTER_DIR="/home/$DEVICE_USER/printer-service"
     mkdir -p "$PRINTER_DIR"
     
+    # Create full server.js with express and print logic
     cat > "$PRINTER_DIR/server.js" <<'NODE_EOF'
-const http = require('http');
+const express = require('express');
 const { exec } = require('child_process');
+const cors = require('cors');
 const axios = require('axios');
+const os = require('os');
 
+const app = express();
 const PORT = process.env.PORT || 8083;
-const DEVICE_ID = process.env.DEVICE_ID || require('os').hostname();
+const DEVICE_ID = process.env.DEVICE_ID || os.hostname();
 const DEVICE_MANAGER_URL = process.env.DEVICE_MANAGER_URL || 'http://100.64.0.7:8090';
+
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 
 // Heartbeat to device manager
 setInterval(() => {
-    axios.post(`${DEVICE_MANAGER_URL}/register`, {
+    const interfaces = os.networkInterfaces();
+    let ip = 'unknown';
+    for (const iface of Object.values(interfaces)) {
+        for (const addr of iface) {
+            if (addr.family === 'IPv4' && !addr.internal) {
+                ip = addr.address;
+                break;
+            }
+        }
+        if (ip !== 'unknown') break;
+    }
+    
+    axios.post(`${DEVICE_MANAGER_URL}/heartbeat`, {
         deviceId: DEVICE_ID,
         capabilities: { printer: true },
-        timestamp: Date.now()
+        printerPort: PORT,
+        ip: ip,
+        hostname: os.hostname()
     }).catch(err => console.error('Heartbeat failed:', err.message));
 }, 30000);
 
-// Health endpoint
-const server = http.createServer((req, res) => {
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', deviceId: DEVICE_ID }));
-    } else if (req.url === '/print' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            const data = JSON.parse(body);
-            // Print logic here (escpos, etc.)
-            console.log('Print request:', data);
-            res.writeHead(200);
-            res.end(JSON.stringify({ success: true }));
-        });
-    }
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', service: 'printer', deviceId: DEVICE_ID, timestamp: new Date().toISOString() });
 });
 
-server.listen(PORT, () => {
-    console.log(`Printer service listening on port ${PORT}`);
+// Print ticket endpoint
+app.post('/print', (req, res) => {
+  const orderData = req.body;
+  
+  console.log(`[${new Date().toISOString()}] Print request for order #${orderData.orderNumber}`);
+  
+  // Validate order data
+  if (!orderData.orderNumber || !orderData.items) {
+    return res.status(400).json({ error: 'Invalid order data' });
+  }
+  
+  // Prepare JSON for Python script
+  const orderJson = JSON.stringify(orderData);
+  const printScriptPath = `${process.env.HOME}/printer-service/print_ticket.py`;
+  const command = `python3 ${printScriptPath} '${orderJson.replace(/'/g, "'\\''")}'`;
+  
+  // Execute print script
+  exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+    if (error) {
+      console.error(`[${new Date().toISOString()}] Print error:`, stderr);
+      return res.status(500).json({ 
+        error: 'Print failed', 
+        details: stderr,
+        orderNumber: orderData.orderNumber 
+      });
+    }
+    
+    console.log(`[${new Date().toISOString()}] Print successful: ${stdout}`);
+    res.json({ 
+      success: true, 
+      message: 'Ticket printed',
+      orderNumber: orderData.orderNumber 
+    });
+  });
+});
+
+// Test print endpoint
+app.post('/test', (req, res) => {
+  const testOrder = {
+    orderNumber: 999,
+    items: [
+      { name: 'Test Pizza', quantity: 1, price: 25.00 },
+      { name: 'Test Napój', quantity: 2, price: 5.00 }
+    ],
+    total: 35.00,
+    paymentMethod: 'TEST',
+    createdAt: new Date().toISOString()
+  };
+  
+  const orderJson = JSON.stringify(testOrder);
+  const printScriptPath = `${process.env.HOME}/printer-service/print_ticket.py`;
+  const command = `python3 ${printScriptPath} '${orderJson.replace(/'/g, "'\\''")}'`;
+  
+  exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
+    if (error) {
+      console.error('Test print error:', stderr);
+      return res.status(500).json({ error: 'Test print failed', details: stderr });
+    }
+    
+    console.log('Test print successful:', stdout);
+    res.json({ success: true, message: 'Test ticket printed' });
+  });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Printer service running on http://0.0.0.0:${PORT}`);
+  console.log('Endpoints:');
+  console.log(`  GET  /health - Health check`);
+  console.log(`  POST /print  - Print order ticket`);
+  console.log(`  POST /test   - Print test ticket`);
 });
 NODE_EOF
+    
+    # Create print_ticket.py with Polish character support
+    cat > "$PRINTER_DIR/print_ticket.py" <<'PYTHON_EOF'
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Gastro Kiosk Pro - Thermal Printer with Polish Characters
+80mm ESC/POS printer with bitmap rendering
+"""
+
+import sys
+import json
+from escpos.printer import Usb
+from PIL import Image, ImageDraw, ImageFont
+from datetime import datetime
+
+# Hwasung printer USB identifiers
+PRINTER_VID = 0x0006
+PRINTER_PID = 0x000b
+
+# Payment method translations
+PAYMENT_METHOD_MAP = {
+    'CASH': 'Gotówka',
+    'CARD': 'Karta',
+    'ONLINE': 'Online',
+    'TERMINAL': 'Terminal'
+}
+
+# Centering configuration
+LEFT_MARGIN = 50  # Adjust for printer alignment (20-80)
+
+def text_to_bitmap(text, width=512, font_size=22, bold=False, left_margin=None):
+    """Convert text to bitmap with Polish characters support"""
+    if left_margin is None:
+        left_margin = LEFT_MARGIN
+    
+    lines = text.split('\n')
+    height = len(lines) * (font_size + 8) + 20
+    total_width = width + left_margin
+    
+    # White background
+    img = Image.new('1', (total_width, height), 1)
+    draw = ImageDraw.Draw(img)
+    
+    # DejaVu Sans font with Polish characters
+    try:
+        if bold:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+        else:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
+    except:
+        font = ImageFont.load_default()
+    
+    # Draw centered lines
+    y_position = 10
+    for line in lines:
+        if line.strip():
+            bbox = draw.textbbox((0, 0), line, font=font)
+            text_width = bbox[2] - bbox[0]
+            x = (width - text_width) // 2 + left_margin
+            x = max(left_margin, x)
+            draw.text((x, y_position), line, fill=0, font=font)
+        y_position += font_size + 8
+    
+    return img
+
+def format_order_ticket(order_data):
+    """Format order data for printing"""
+    try:
+        order_number = order_data.get('orderNumber', 'N/A')
+        items = order_data.get('items', [])
+        total = order_data.get('total', 0)
+        payment_method_raw = order_data.get('paymentMethod', 'UNKNOWN')
+        payment_method = PAYMENT_METHOD_MAP.get(payment_method_raw, payment_method_raw)
+        created_at = order_data.get('createdAt', datetime.now().isoformat())
+        
+        try:
+            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            time_str = str(created_at)
+        
+        return {
+            'orderNumber': order_number,
+            'items': items,
+            'total': total,
+            'paymentMethod': payment_method,
+            'timestamp': time_str
+        }
+    except Exception as e:
+        print(f"Format error: {e}", file=sys.stderr)
+        return None
+
+def print_ticket(order_data):
+    """Print ticket with Polish characters and manual centering"""
+    try:
+        printer = Usb(PRINTER_VID, PRINTER_PID, timeout=5000, in_ep=0x82, out_ep=0x01)
+        printer.text('\x1b\x40')  # Initialize printer
+        
+        # Header
+        header = text_to_bitmap("GASTRO KIOSK PRO", width=512, font_size=24, bold=True)
+        printer.image(header, impl="bitImageRaster")
+        
+        separator = text_to_bitmap("=" * 32, width=512, font_size=16)
+        printer.image(separator, impl="bitImageRaster")
+        
+        # Order number (large)
+        order_num_text = f"#{order_data['orderNumber']}"
+        order_number_img = text_to_bitmap(order_num_text, width=512, font_size=88, bold=True)
+        printer.image(order_number_img, impl="bitImageRaster")
+        
+        printer.image(separator, impl="bitImageRaster")
+        
+        # Details
+        details = f"Data: {order_data['timestamp']}\nPłatność: {order_data['paymentMethod']}"
+        details_img = text_to_bitmap(details, width=512, font_size=18)
+        printer.image(details_img, impl="bitImageRaster")
+        
+        dash_separator = text_to_bitmap("-" * 32, width=512, font_size=16)
+        printer.image(dash_separator, impl="bitImageRaster")
+        
+        # Items header
+        items_header = text_to_bitmap("POZYCJE:", width=512, font_size=20, bold=True)
+        printer.image(items_header, impl="bitImageRaster")
+        printer.image(dash_separator, impl="bitImageRaster")
+        
+        # Print each item
+        for item in order_data['items']:
+            name = item.get('name', 'Unknown')
+            quantity = item.get('quantity', 1)
+            price = item.get('price', 0)
+            total_item = quantity * price
+            
+            item_name_img = text_to_bitmap(name, width=512, font_size=20, bold=True)
+            printer.image(item_name_img, impl="bitImageRaster")
+            
+            item_details = f"{quantity} x {price:.2f} PLN = {total_item:.2f} PLN"
+            item_details_img = text_to_bitmap(item_details, width=512, font_size=18)
+            printer.image(item_details_img, impl="bitImageRaster")
+        
+        printer.image(dash_separator, impl="bitImageRaster")
+        
+        # Total
+        total_text = f"SUMA: {order_data['total']:.2f} PLN"
+        total_img = text_to_bitmap(total_text, width=512, font_size=32, bold=True)
+        printer.image(total_img, impl="bitImageRaster")
+        
+        printer.image(separator, impl="bitImageRaster")
+        
+        # Footer
+        footer = text_to_bitmap("Dziękujemy za zamówienie!\nSmacznego!", width=512, font_size=20)
+        printer.image(footer, impl="bitImageRaster")
+        
+        printer.ln(3)
+        printer.cut(mode='FULL')
+        printer.close()
+        
+        print("✓ Ticket printed successfully", file=sys.stderr)
+        return True
+        
+    except Exception as e:
+        print(f"✗ Print error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 print_ticket.py '<json_order_data>'", file=sys.stderr)
+        sys.exit(1)
+    
+    try:
+        order_json = sys.argv[1]
+        order_raw = json.loads(order_json)
+        order_data = format_order_ticket(order_raw)
+        if not order_data:
+            print("Format error", file=sys.stderr)
+            sys.exit(1)
+        
+        if print_ticket(order_data):
+            print("SUCCESS")
+            sys.exit(0)
+        else:
+            print("FAILED")
+            sys.exit(1)
+            
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+PYTHON_EOF
+    
+    chmod +x "$PRINTER_DIR/print_ticket.py"
     
     cat > "$PRINTER_DIR/package.json" <<'JSON_EOF'
 {
@@ -658,6 +966,8 @@ NODE_EOF
   "version": "1.0.0",
   "main": "server.js",
   "dependencies": {
+    "express": "^4.18.0",
+    "cors": "^2.8.5",
     "axios": "^1.6.0"
   }
 }
@@ -678,6 +988,7 @@ WorkingDirectory=$PRINTER_DIR
 Environment="PORT=8083"
 Environment="DEVICE_ID=$DEVICE_HOSTNAME"
 Environment="DEVICE_MANAGER_URL=$DEVICE_MANAGER_URL"
+Environment="HOME=/home/$DEVICE_USER"
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=10
@@ -690,7 +1001,10 @@ EOF
     systemctl enable gastro-printer.service
     systemctl start gastro-printer.service
     
-    log "Printer service installed and started"
+    log "Printer service installed and started successfully"
+    log "Testing printer service..."
+    sleep 2
+    curl -s http://localhost:8083/health || log_warning "Printer service health check failed"
 }
 
 install_terminal_service() {
@@ -714,10 +1028,11 @@ const DEVICE_MANAGER_URL = process.env.DEVICE_MANAGER_URL || 'http://100.64.0.7:
 
 // Heartbeat to device manager
 setInterval(() => {
-    axios.post(`${DEVICE_MANAGER_URL}/register`, {
+    axios.post(`${DEVICE_MANAGER_URL}/heartbeat`, {
         deviceId: DEVICE_ID,
         capabilities: { paymentTerminal: true },
-        timestamp: Date.now()
+        ip: require('os').networkInterfaces().eth0?.[0]?.address || 'unknown',
+        hostname: require('os').hostname()
     }).catch(err => console.error('Heartbeat failed:', err.message));
 }, 30000);
 
