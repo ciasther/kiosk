@@ -1350,8 +1350,8 @@ phase8_validation() {
         log "✓ Startup script is executable"
         
         # Verify script contains correct URL
-        if grep -q "https://$SERVER_IP:$PORT_NUMBER" /usr/local/bin/gastro-kiosk-start.sh; then
-            log "  Kiosk URL: https://$SERVER_IP:$PORT_NUMBER?deviceId=$DEVICE_HOSTNAME"
+        if grep -q "https://$SERVER_IP:$SERVER_PORT" /usr/local/bin/gastro-kiosk-start.sh; then
+            log "  Kiosk URL: https://$SERVER_IP:$SERVER_PORT?deviceId=$DEVICE_HOSTNAME"
         else
             log_warning "  URL in startup script might be incorrect"
         fi
