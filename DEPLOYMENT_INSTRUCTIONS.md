@@ -526,18 +526,103 @@ journalctl -u gastro-terminal.service -n 20
 curl http://100.64.0.7:8090/health
 # Powinno zwrócić: {"status":"ok"}
 
-# Ręczna rejestracja (test)
-curl -X POST http://100.64.0.7:8090/register \
+# Ręczna rejestracja (test) - UWAGA: używaj /heartbeat, nie /register
+curl -X POST http://100.64.0.7:8090/heartbeat \
   -H "Content-Type: application/json" \
   -d '{
     "deviceId": "kiosk01",
-    "capabilities": {"printer": true, "paymentTerminal": true},
-    "timestamp": 1234567890
+    "capabilities": {"printer": true, "printerPort": 8083},
+    "ip": "100.64.0.3",
+    "hostname": "kiosk01"
   }'
 
 # Sprawdź czy widzi urządzenie
 curl http://100.64.0.7:8090/devices/kiosk01
 ```
+
+**Automatyczna weryfikacja podczas instalacji**:
+
+Skrypt `kiosk-install-v2.sh` w wersji 3.0.11+ zawiera rozszerzoną walidację (Phase 8), która automatycznie sprawdza:
+
+✅ **Python Dependencies**: python-escpos, pillow
+✅ **Node.js Modules**: express, cors, axios
+✅ **Pliki**: print_ticket.py, server.js
+✅ **Printer Service**: czy działa, czy odpowiada na port 8083
+✅ **Heartbeat**: czy wysyła VPN IP (100.64.0.x) zamiast LAN (192.168.x.x)
+✅ **Device-Manager**: czy urządzenie jest zarejestrowane
+✅ **printerPort**: czy jest obecny w capabilities
+✅ **Backend API**: czy wykrywa urządzenie
+
+**Przykład output walidacji**:
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRINTER SERVICE VALIDATION (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Checking Python dependencies...
+  ✓ python-escpos installed
+  ✓ pillow installed
+  ✓ print_ticket.py exists
+  ✓ express module installed
+  ✓ axios module installed
+Starting printer service for validation...
+  ✓ Printer service is running
+Checking heartbeat...
+  ✓ Heartbeat sent successfully
+  ✓ Using VPN IP: 100.64.0.3
+Checking device-manager registration...
+  ✓ Device registered in device-manager
+  ✓ printerPort: 8083
+  ✓ Device-manager has VPN IP: 100.64.0.3
+Testing printer HTTP endpoint...
+  ✓ Printer service responds on port 8083
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ All validation checks passed!
+```
+
+**Weryfikacja ręczna (po reboot)**:
+```bash
+# 1. Sprawdź logi heartbeat - MUSI pokazywać VPN IP (100.64.0.x)
+journalctl -u gastro-printer.service -n 5
+# ✅ POPRAWNE: [Heartbeat] OK - kiosk01 @ 100.64.0.3
+# ❌ BŁĄD: [Heartbeat] OK - kiosk01 @ 192.168.31.x (używa LAN!)
+
+# 2. Sprawdź device-manager - MUSI mieć printerPort
+curl http://100.64.0.7:8090/devices/kiosk01 | jq .
+# ✅ POPRAWNE:
+# {
+#   "id": "kiosk01",
+#   "printer": true,
+#   "printerPort": "8083",   <-- MUSI BYĆ!
+#   "ip": "100.64.0.3",       <-- VPN IP, nie 192.168.x!
+#   "online": true
+# }
+
+# 3. Test wydruku
+curl -X POST http://localhost:8083/test
+# ✅ POPRAWNE: {"success":true,"message":"Test ticket printed"}
+```
+
+**Co robić jeśli walidacja FAILED**:
+
+Skrypt wyświetli szczegółowe informacje o błędach i polecenia naprawcze.
+Najczęstsze problemy:
+
+1. **VPN nie połączony podczas instalacji**
+   - Sprawdź: `tailscale status`
+   - Napraw: `sudo tailscale up --login-server=... --authkey=...`
+
+2. **Brakujące moduły Python**
+   - Napraw: `pip3 install --break-system-packages python-escpos pillow`
+
+3. **Heartbeat używa LAN IP zamiast VPN**
+   - Sprawdź: `ip addr show tailscale0`
+   - Jeśli brak interfejsu tailscale0, VPN nie działa
+   - Uruchom ponownie skrypt lub napraw VPN
+
+4. **printerPort brak w device-manager**
+   - Oznacza starą wersję server.js
+   - Uruchom ponownie instalację lub zaktualizuj ręcznie
 
 ---
 
