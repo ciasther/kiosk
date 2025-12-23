@@ -544,69 +544,62 @@ npm --version
 
 ### Krok 6.2A: Instalacja Printer Service (jeśli masz drukarkę)
 
+**UWAGA**: Pełna automatyczna instalacja jest w skrypcie `kiosk-install-v2.sh`.  
+Poniżej instrukcja manualna dla zaawansowanych użytkowników.
+
+#### Krok 1: Zainstaluj zależności systemowe
+
+```bash
+# Python i biblioteki
+sudo apt-get install -y python3-pip python3-pil libusb-1.0-0 python3-usb fonts-dejavu-core
+
+# Moduły Python dla ESC/POS
+pip3 install --break-system-packages python-escpos pillow
+# Lub dla Ubuntu 22.04:
+# pip3 install python-escpos pillow
+
+# Uprawnienia użytkownika
+sudo usermod -a -G lp,dialout $DEVICE_USER
+```
+
+#### Krok 2: Wyłącz CUPS (KRYTYCZNE!)
+
+```bash
+# CUPS blokuje dostęp USB do drukarki
+sudo systemctl stop cups cups.socket cups.path cups-browsed
+sudo systemctl disable cups cups.socket cups.path cups-browsed
+sudo systemctl mask cups  # Zapobiega auto-startowi
+
+# Blacklist moduł usblp
+sudo bash -c 'cat > /etc/modprobe.d/blacklist-usblp.conf <<EOF
+# Disable usblp kernel module for direct ESC/POS printing
+blacklist usblp
+EOF'
+
+# Wyładuj jeśli załadowany
+sudo rmmod usblp 2>/dev/null || true
+```
+
+#### Krok 3: Utwórz printer-service
+
 ```bash
 # Utwórz katalog
 sudo -u $DEVICE_USER mkdir -p /home/$DEVICE_USER/printer-service
 cd /home/$DEVICE_USER/printer-service
 
-# Utwórz server.js
-sudo -u $DEVICE_USER bash -c 'cat > server.js' <<'NODE_EOF'
-const http = require('http');
-const { exec } = require('child_process');
-const axios = require('axios');
+# UWAGA: Pełny kod server.js i print_ticket.py jest w skrypcie instalacyjnym
+# Zobacz: /home/ciasther/webapp/bakery/deploy/scripts/kiosk-install-v2.sh
+# Linie 647-1007 zawierają kompletną implementację
 
-const PORT = process.env.PORT || 8083;
-const DEVICE_ID = process.env.DEVICE_ID || require('os').hostname();
-const DEVICE_MANAGER_URL = process.env.DEVICE_MANAGER_URL || 'http://100.64.0.7:8090';
+# Zamiast kopiować tutaj 400+ linii kodu, użyj skryptu:
+sudo bash kiosk-install-v2.sh
+# I wybierz tylko "Install printer service? (y)"
 
-// Heartbeat do device managera co 30s
-setInterval(() => {
-    axios.post(`${DEVICE_MANAGER_URL}/register`, {
-        deviceId: DEVICE_ID,
-        capabilities: { printer: true },
-        timestamp: Date.now()
-    }).catch(err => console.error('Heartbeat failed:', err.message));
-}, 30000);
+# Lub skopiuj pliki z działającego urządzenia:
+# scp admin1@100.64.0.6:/home/admin1/printer-service/* ./
 
-// Health endpoint
-const server = http.createServer((req, res) => {
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', deviceId: DEVICE_ID }));
-    } else if (req.url === '/print' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            const data = JSON.parse(body);
-            console.log('Print request:', data);
-            // TODO: Implementacja drukowania (escpos, etc.)
-            res.writeHead(200);
-            res.end(JSON.stringify({ success: true }));
-        });
-    }
-});
-
-server.listen(PORT, () => {
-    console.log(`Printer service listening on port ${PORT}`);
-    console.log(`Device ID: ${DEVICE_ID}`);
-    console.log(`Device Manager: ${DEVICE_MANAGER_URL}`);
-});
-NODE_EOF
-
-# Utwórz package.json
-sudo -u $DEVICE_USER bash -c 'cat > package.json' <<'JSON_EOF'
-{
-  "name": "printer-service",
-  "version": "1.0.0",
-  "main": "server.js",
-  "dependencies": {
-    "axios": "^1.6.0"
-  }
-}
-JSON_EOF
-
-# Zainstaluj dependencies
-sudo -u $DEVICE_USER npm install
+# Zainstaluj Node.js dependencies
+sudo -u $DEVICE_USER npm install express cors axios
 
 # Utwórz systemd service
 sudo bash -c "cat > /etc/systemd/system/gastro-printer.service" <<EOF
@@ -620,7 +613,8 @@ User=$DEVICE_USER
 WorkingDirectory=/home/$DEVICE_USER/printer-service
 Environment="PORT=8083"
 Environment="DEVICE_ID=$DEVICE_HOSTNAME"
-Environment="DEVICE_MANAGER_URL=$DEVICE_MANAGER_URL"
+Environment="DEVICE_MANAGER_URL=http://100.64.0.7:8090"
+Environment="HOME=/home/$DEVICE_USER"
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=10
@@ -636,6 +630,20 @@ sudo systemctl start gastro-printer.service
 
 # Sprawdź status
 systemctl status gastro-printer.service
+
+# Test drukowania
+curl -X POST http://localhost:8083/test
+# Powinien wydrukować testowy bilet
+```
+
+**Kluczowe punkty**:
+- ✅ CUPS musi być wyłączony i zamaskowany
+- ✅ usblp musi być na blackliście
+- ✅ Użytkownik w grupach lp, dialout
+- ✅ Python modules: python-escpos, pillow
+- ✅ Pełny kod w `kiosk-install-v2.sh` (linie 647-1007)
+- ✅ Port 8083 dla printer-service
+- ✅ Endpoint `/print` (nie `/print/ticket`!)
 ```
 
 ---

@@ -96,31 +96,89 @@ DISPLAY=:0 xinput_calibrator
 
 **Objawy**:
 - Zamówienie złożone ale brak wydruku
+- Błąd "Nie można wydrukować biletu"
+- Błąd "Resource busy" w logach
 - Drukarka świeci czerwonym LED
 
-**Rozwiązanie**:
+**Najczęstsze przyczyny (v3.0.10)**:
+
+#### 1. CUPS blokuje drukarkę (Resource busy) 🔴 CRITICAL
+
+**Symptom**: `[Errno 16] Resource busy` w logach
+
 ```bash
-# 1. Sprawdź czy system widzi drukarkę
-lsusb | grep -i printer
-# lub
-lpstat -p -d
+# Wyłącz CUPS permanentnie
+sudo systemctl stop cups cups.socket cups.path cups-browsed
+sudo systemctl disable cups cups.socket cups.path cups-browsed
+sudo systemctl mask cups  # Zapobiega auto-startowi!
 
-# 2. Sprawdź papier
-# - Czy jest załadowany?
-# - Czy prawidłowym końcem (termiczny na zewnątrz)?
-# - Czy pokrywa zamknięta?
+# Sprawdź
+systemctl status cups  # Powinno być: masked
 
-# 3. Restart drukarki
-# Wyłącz, odczekaj 10s, włącz
+# Restart printer-service
+sudo systemctl restart gastro-printer.service
+```
 
-# 4. Sprawdź usługę
+#### 2. Moduł usblp konfliktuje z ESC/POS
+
+```bash
+# Blacklist usblp
+sudo bash -c 'cat > /etc/modprobe.d/blacklist-usblp.conf <<EOF
+blacklist usblp
+EOF'
+
+# Wyładuj
+sudo rmmod usblp 2>/dev/null
+
+# Sprawdź (powinien być pusty)
+lsmod | grep usblp
+```
+
+#### 3. Brak modułów Python
+
+**Symptom**: `ModuleNotFoundError: No module named 'escpos'`
+
+```bash
+# Ubuntu 24.04
+pip3 install --break-system-packages python-escpos pillow
+
+# Ubuntu 22.04
+pip3 install python-escpos pillow
+```
+
+#### 4. Brak uprawnień
+
+**Symptom**: `[Errno 13] Access denied`
+
+```bash
+sudo usermod -a -G lp,dialout $USER
+# Wyloguj i zaloguj ponownie
+```
+
+#### 5. Endpoint mismatch
+
+**Symptom**: Backend logs: `Request failed with status code 404`
+
+Backend i printer-service muszą używać `/print` (nie `/print/ticket`)
+
+#### 6. Standardowa diagnoza
+
+```bash
+# 1. Sprawdź drukarkę USB
+lsusb | grep -i hwasung
+# Powinno: 0006:000b hwasung HWASUNG USB Printer I/F
+
+# 2. Test drukowania
+curl -X POST http://localhost:8083/test
+
+# 3. Sprawdź service
 systemctl status gastro-printer.service
 
-# 5. Test wydruku
-echo "TEST PRINT" | lp
-
-# 6. Sprawdź logi
+# 4. Logi
 journalctl -u gastro-printer.service -n 50
+```
+
+**Więcej szczegółów**: Zobacz `AGENTS.md` sekcja "🖨️ PRINTER INTEGRATION"
 ```
 
 ---
