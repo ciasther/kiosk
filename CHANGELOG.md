@@ -1,5 +1,49 @@
 # Changelog - Gastro Kiosk Pro
 
+## [3.0.10] - 2025-12-22 ✅ PRINTER PLUG-AND-PLAY FIX + ROUTING FIX
+
+### Summary
+Fixed critical issues with printer service installation script that prevented automatic printer detection and printing functionality on new devices. Also fixed backend endpoint mismatch and routing issues that caused all devices to print on wrong printers.
+
+### Fixed - Installation Script
+- **Python Dependencies Missing**: Script didn't install `python3-pip`, `python-escpos`, `pillow`, `libusb-1.0-0`, `python3-usb`
+- **No Print Logic**: `server.js` returned `success: true` without actually printing
+- **Missing print_ticket.py**: Script file didn't exist - created complete 265-line Python script
+- **USB Access Conflicts**: CUPS blocked direct USB access - disabled CUPS and blacklisted `usblp` module
+- **Permission Issues**: User not in printer groups - added automatic `usermod -a -G lp,dialout`
+- **Wrong Port in Heartbeat**: Fixed hardcoded port 8081 → 8083
+
+### Fixed - Backend Routing (2025-12-23)
+- **Endpoint Mismatch**: Backend sent `/print/ticket` but printer-service had `/print`
+  - Changed backend to use correct `/print` endpoint
+- **CUPS Resource Busy**: CUPS re-enabled after restart, blocking USB printer
+  - Masked CUPS to prevent auto-start
+  - Verified usblp module blacklisted
+- **Device Routing**: Each device now prints on its own local printer
+  - kiosk@100.64.0.11 → local Hwasung printer ✅
+  - admin1@100.64.0.6 → local Hwasung printer ✅
+
+### Added
+- Complete `print_ticket.py` with Polish characters support (DejaVu Sans font)
+- Full Express.js server with `/health`, `/print`, `/test` endpoints
+- Automatic system dependency installation (fonts, USB libraries, Python tools)
+- Device-specific printer routing via deviceId
+
+### Changed
+- `deploy/scripts/kiosk-install-v2.sh` - Complete rewrite of `install_printer_service()` (92 → 395 lines)
+- `backend/src/routes/printer.js` - Fixed endpoint from `/print/ticket` to `/print`
+
+### Testing
+✅ Tested on kiosk@100.64.0.11 - All endpoints working, prints with Polish characters
+✅ Tested on admin1@100.64.0.6 - Prints on correct local printer
+✅ Both VPN-only and local network scenarios working
+
+### Documentation
+- `PRINTER_FIX_REPORT_20251222.md` - Comprehensive diagnostic and fix report
+- `AGENTS.md` - Updated with printer architecture details
+
+---
+
 ## [3.1.0] - 2025-12-22 🚀 ENTERPRISE - INSTALLATION SYSTEM V2.0
 
 **Status**: PRODUCTION READY - Enterprise-grade installation and deployment system
