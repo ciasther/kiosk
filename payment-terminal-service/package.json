@@ -1,0 +1,25 @@
+{
+  "name": "pep-payment-terminal-service",
+  "version": "2.0.0",
+  "description": "PeP Payment Terminal Integration Service - Real UDP Protocol",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "TEST_MODE=true node server.js"
+  },
+  "keywords": [
+    "payment",
+    "terminal",
+    "pep",
+    "polskie-eplatnosci",
+    "udp"
+  ],
+  "author": "Gastro Kiosk Pro",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "serialport": "^13.0.0"
+  }
+}
