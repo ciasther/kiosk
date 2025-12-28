@@ -15,5 +15,10 @@ ACTION=="add|change", KERNEL=="event[0-9]*", ENV{ID_INPUT_TOUCHSCREEN}=="1", ATT
 
 3. 
 ```
+sudo cp ~/.config/monitors.xml /etc/xdg/monitors.xml
+```
+
+4.
+```
 sudo reboot
 ``` 
