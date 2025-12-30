@@ -177,6 +177,9 @@ detect_printer() {
     
     log "Scanning USB devices for printers..."
     
+    # Global flag for printer detection
+    PRINTER_DETECTED=false
+    
     # Create temporary Python script for USB detection
     cat > /tmp/detect_printer.py <<'PYTHON_EOF'
 #!/usr/bin/env python3
@@ -238,6 +241,7 @@ PYTHON_EOF
     if DETECTED=$(python3 /tmp/detect_printer.py 2>/dev/null); then
         PRINTER_VID=$(echo "$DETECTED" | cut -d: -f1)
         PRINTER_PID=$(echo "$DETECTED" | cut -d: -f2)
+        PRINTER_DETECTED=true
         log "✓ Printer detected: VID=$PRINTER_VID PID=$PRINTER_PID"
         
         # Show device info from lsusb
@@ -247,14 +251,54 @@ PYTHON_EOF
         fi
     else
         log_warning "⚠ No USB printer detected automatically"
-        log_warning "  Using default fallback: VID=$PRINTER_VID PID=$PRINTER_PID"
-        log_warning "  You can manually override these values later in:"
-        log_warning "    /home/$DEVICE_USER/printer-service/print_ticket.py"
+        log_warning "  Printer service will not be installed"
     fi
     
     rm -f /tmp/detect_printer.py
     
     log_info "Printer configuration: VID=$PRINTER_VID PID=$PRINTER_PID"
+}
+
+detect_terminal() {
+    print_header "AUTO-DETECTING PAYMENT TERMINAL"
+    
+    log "Scanning for Ingenico terminal..."
+    
+    # Global flag for terminal detection
+    TERMINAL_DETECTED=false
+    
+    # Check for Ingenico MAC address (known terminal: 10:1e:da:45:37:ce)
+    if arp -a | grep -qi "10:1e:da"; then
+        TERMINAL_DETECTED=true
+        TERMINAL_IP=$(arp -a | grep -i "10:1e:da" | awk '{print $2}' | tr -d '()')
+        log "✓ Ingenico terminal detected via ARP"
+        log_info "  MAC: 10:1e:da:xx:xx:xx"
+        log_info "  IP: $TERMINAL_IP (if available)"
+    fi
+    
+    # Check for terminal on known subnet (10.42.0.x)
+    if ! $TERMINAL_DETECTED; then
+        if ip addr show | grep -q "10.42.0"; then
+            log_info "Found NAT subnet 10.42.0.x - terminal might be connected"
+            # Ping sweep to find terminal
+            for i in {70..80}; do
+                if ping -c 1 -W 1 10.42.0.$i &>/dev/null; then
+                    TERMINAL_IP="10.42.0.$i"
+                    TERMINAL_DETECTED=true
+                    log "✓ Device found at 10.42.0.$i (possible terminal)"
+                    break
+                fi
+            done
+        fi
+    fi
+    
+    if $TERMINAL_DETECTED; then
+        log "✓ Payment terminal detected - service will be installed"
+        log_warning "  Terminal TID will use placeholder (configure later in .env)"
+    else
+        log_warning "⚠ No payment terminal detected"
+        log_warning "  Payment terminal service will not be installed"
+    fi
 }
 
 ################################################################################
@@ -409,6 +453,9 @@ xset -dpms
 # Hide mouse cursor after 1s of inactivity
 unclutter -idle 1 -root &
 
+# Small delay to ensure X11 is fully ready before applying xrandr
+sleep 2
+
 # Wait for VPN (if needed) and launch kiosk application
 /usr/local/bin/gastro-kiosk-start.sh &
 OPENBOX_EOF
@@ -445,25 +492,20 @@ OPENBOX_RC_EOF
             log "Detected vertical display rotation (right) in monitors.xml"
             log_warning "Note: monitors.xml only works with GNOME. Adding xrandr for openbox..."
             
-            # Detect primary output (run as user to avoid permission issues)
-            PRIMARY_OUTPUT=$(su - $DEVICE_USER -c "DISPLAY=:0 xrandr 2>/dev/null | grep ' connected primary' | awk '{print \$1}'" || echo "HDMI-1")
-            
-            # Add xrandr before gastro-kiosk-start.sh
-            sed -i "/gastro-kiosk-start.sh/i # Rotate display to vertical (auto-detected from monitors.xml)\nxrandr --output $PRIMARY_OUTPUT --rotate right\n" \
+            # Add xrandr with dynamic output detection (will run when X11 is ready)
+            sed -i "/gastro-kiosk-start.sh/i # Rotate display to vertical (auto-detected from monitors.xml)\nPRIMARY_OUTPUT=\$(xrandr 2>/dev/null | grep ' connected primary' | awk '{print \$1}' || echo 'HDMI-1')\nxrandr --output \"\$PRIMARY_OUTPUT\" --rotate right\n" \
                 "/home/$DEVICE_USER/.config/openbox/autostart"
             
-            log "✓ Added xrandr rotation for output: $PRIMARY_OUTPUT"
+            log "✓ Added xrandr rotation (will auto-detect output at runtime)"
             
         elif grep -q '<rotation>left</rotation>' "/home/$DEVICE_USER/.config/monitors.xml"; then
             log "Detected vertical display rotation (left) in monitors.xml"
             log_warning "Note: monitors.xml only works with GNOME. Adding xrandr for openbox..."
             
-            PRIMARY_OUTPUT=$(su - $DEVICE_USER -c "DISPLAY=:0 xrandr 2>/dev/null | grep ' connected primary' | awk '{print \$1}'" || echo "HDMI-1")
-            
-            sed -i "/gastro-kiosk-start.sh/i # Rotate display to vertical (auto-detected from monitors.xml)\nxrandr --output $PRIMARY_OUTPUT --rotate left\n" \
+            sed -i "/gastro-kiosk-start.sh/i # Rotate display to vertical (auto-detected from monitors.xml)\nPRIMARY_OUTPUT=\$(xrandr 2>/dev/null | grep ' connected primary' | awk '{print \$1}' || echo 'HDMI-1')\nxrandr --output \"\$PRIMARY_OUTPUT\" --rotate left\n" \
                 "/home/$DEVICE_USER/.config/openbox/autostart"
             
-            log "✓ Added xrandr rotation for output: $PRIMARY_OUTPUT"
+            log "✓ Added xrandr rotation (will auto-detect output at runtime)"
         else
             log_info "No vertical rotation detected in monitors.xml"
         fi
@@ -591,7 +633,7 @@ phase5_kiosk_service() {
     print_header "PHASE 5: KIOSK STARTUP SERVICE"
     
     log "Creating kiosk startup script with HARD RESTART on timeout..."
-    cat > /usr/local/bin/gastro-kiosk-start.sh <<STARTUP_EOF
+    cat > /usr/local/bin/gastro-kiosk-start.sh <<'STARTUP_EOF'
 #!/bin/bash
 ################################################################################
 # Gastro Kiosk Startup Script - Debian 13 with HARD RESTART on failure
@@ -735,14 +777,14 @@ chromium \
     "$URL" \
     >> "$LOG_FILE" 2>&1 &
 
-CHROME_PID=\$!
-log "Chromium started with PID: \$CHROME_PID"
+CHROME_PID=$!
+log "Chromium started with PID: $CHROME_PID"
 
 # Chromium on X11 with Openbox should handle fullscreen automatically
 # Openbox rc.xml forces <fullscreen>yes</fullscreen> for Chromium class
 
 # Keep script running
-wait \$CHROME_PID
+wait $CHROME_PID
 STARTUP_EOF
     
     chmod +x /usr/local/bin/gastro-kiosk-start.sh
@@ -783,18 +825,16 @@ EOF
 }
 
 phase6_printer_service() {
-    print_header "PHASE 6: PRINTER SERVICE (OPTIONAL)"
+    print_header "PHASE 6: PRINTER SERVICE (AUTO-INSTALL)"
     
-    echo ""
-    log_info "This installs printer service for ESC/POS thermal printers"
-    log_info "Detected printer: VID=$PRINTER_VID PID=$PRINTER_PID"
-    echo ""
-    read -p "Install printer service? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "Skipping printer service installation"
+    # Auto-install if printer was detected
+    if [[ "$PRINTER_DETECTED" != "true" ]]; then
+        log "No printer detected - skipping printer service installation"
+        log "Phase 6 skipped"
         return 0
     fi
+    
+    log "Printer detected (VID=$PRINTER_VID PID=$PRINTER_PID) - installing service..."
     
     log "Installing Node.js..."
     if ! command -v node &>/dev/null; then
@@ -1267,37 +1307,22 @@ EOF
 }
 
 phase7_terminal_service() {
-    print_header "PHASE 7: PAYMENT TERMINAL SERVICE (OPTIONAL)"
+    print_header "PHASE 7: PAYMENT TERMINAL SERVICE (AUTO-INSTALL)"
     
-    echo ""
-    log_info "This installs payment terminal service for Ingenico PeP terminals"
-    log_info "Requires: Payment terminal connected via Ethernet/USB"
-    echo ""
-    read -p "Install payment terminal service? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log "Skipping payment terminal service installation"
+    # Auto-install if terminal was detected
+    if [[ "$TERMINAL_DETECTED" != "true" ]]; then
+        log "No payment terminal detected - skipping terminal service installation"
+        log "Phase 7 skipped"
         return 0
     fi
     
-    # Prompt for Terminal TID (like authkey for VPN)
-    echo ""
-    log_warning "You need your terminal TID (8 digits). Check on terminal device:"
-    log_warning "  Terminal: Menu → Zarządzanie → Wizytówka → TID"
-    log_warning "  Example: 01100460"
-    echo ""
-    read -p "Enter terminal TID (8 digits): " TERMINAL_TID
+    log "Payment terminal detected - installing service..."
     
-    # Validate TID
-    if [[ -z "$TERMINAL_TID" ]]; then
-        log_error "Terminal TID cannot be empty"
-        log_error "You can configure it later in: ~/payment-terminal-service/.env"
-        TERMINAL_TID="00000000"
-        log_warning "Using placeholder TID. Terminal will need manual configuration."
-    elif [[ ! "$TERMINAL_TID" =~ ^[0-9]{8}$ ]]; then
-        log_warning "TID should be 8 digits. You entered: $TERMINAL_TID"
-        log_warning "Continuing anyway - you can change it later in .env"
-    fi
+    # Use placeholder TID (user will configure later)
+    TERMINAL_TID="00000000"
+    log_warning "Using placeholder TID: $TERMINAL_TID"
+    log_warning "Configure actual TID later in: ~/payment-terminal-service/.env"
+    log_warning "  Terminal: Menu → Zarządzanie → Wizytówka → TID"
     
     log "Installing payment terminal service..."
     log_info "Terminal TID: $TERMINAL_TID"
@@ -1774,8 +1799,9 @@ main() {
     phase3_chromium
     phase4_vpn
     
-    # Auto-detect printer before asking about installation
+    # Auto-detect hardware before installation
     detect_printer
+    detect_terminal
     
     phase5_kiosk_service
     phase6_printer_service
