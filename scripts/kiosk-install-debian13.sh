@@ -43,6 +43,7 @@ readonly AUTHKEY_PLACEHOLDER="YOUR_AUTHKEY_HERE"
 DEVICE_ROLE="customer"  # customer, cashier, display
 DEVICE_USER=""
 DEVICE_HOSTNAME=""
+USER_RUNNING="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"  # User who ran sudo
 
 # Printer configuration (will be auto-detected)
 PRINTER_VID="0x0006"  # Default fallback (Hwasung)
@@ -335,6 +336,19 @@ phase1_system_preparation() {
         log_info "User $DEVICE_USER already exists"
         # Ensure user is in correct groups
         usermod -aG sudo,plugdev,dialout,lp,video,audio "$DEVICE_USER"
+    fi
+    
+    log "Checking for monitor configuration to inherit..."
+    # Copy monitors.xml from running user (if exists) to new kiosk user
+    if [ -n "$USER_RUNNING" ] && [ -f "/home/$USER_RUNNING/.config/monitors.xml" ]; then
+        log "Found monitors.xml from $USER_RUNNING - copying to $DEVICE_USER"
+        mkdir -p /home/$DEVICE_USER/.config
+        cp /home/$USER_RUNNING/.config/monitors.xml /home/$DEVICE_USER/.config/
+        chown -R $DEVICE_USER:$DEVICE_USER /home/$DEVICE_USER/.config
+        log "Monitor configuration inherited successfully (rotation, resolution, etc.)"
+    else
+        log_warning "No monitors.xml found in /home/$USER_RUNNING/.config/"
+        log_warning "If using vertical display, configure rotation manually before running this script"
     fi
     
     log "Phase 1 completed successfully"
