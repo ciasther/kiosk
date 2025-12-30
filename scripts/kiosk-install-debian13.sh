@@ -544,7 +544,7 @@ phase5_kiosk_service() {
     print_header "PHASE 5: KIOSK STARTUP SERVICE"
     
     log "Creating kiosk startup script with HARD RESTART on timeout..."
-    cat > /usr/local/bin/gastro-kiosk-start.sh <<'STARTUP_EOF'
+    cat > /usr/local/bin/gastro-kiosk-start.sh <<STARTUP_EOF
 #!/bin/bash
 ################################################################################
 # Gastro Kiosk Startup Script - Debian 13 with HARD RESTART on failure
