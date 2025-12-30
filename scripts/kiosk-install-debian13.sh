@@ -3,8 +3,9 @@
 # Gastro Kiosk Pro - Debian 13 Installation Script v3.0
 # 
 # Features:
-#   - GNOME/Wayland native (no LightDM)
+#   - LightDM + Openbox (minimal kiosk, no GNOME)
 #   - Auto-detection of USB printers with VID/PID injection
+#   - Payment terminal heartbeat (device-manager integration)
 #   - Hard restart on timeout (no hanging)
 #   - Python venv for Debian 13 PEP 668 compliance
 #   - Full validation and retry logic
@@ -1245,6 +1246,17 @@ phase7_terminal_service() {
     log_info "Terminal TID: $TERMINAL_TID"
     TERMINAL_DIR="/home/$DEVICE_USER/payment-terminal-service"
     
+    # Verify git is installed
+    if ! command -v git &>/dev/null; then
+        log_warning "Git not found - installing..."
+        if ! apt-get install -y -qq git 2>&1 | tee -a "$LOG_FILE"; then
+            log_error "Failed to install git. Terminal service requires git to download from GitHub."
+            log_error "Please install manually: apt-get install -y git"
+            return 1
+        fi
+        log "✓ Git installed successfully"
+    fi
+    
     log "Downloading terminal service from GitHub..."
     if ! git clone -b payment-terminal-service https://github.com/ciasther/kiosk.git /tmp/kiosk-terminal 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to download terminal service from GitHub"
@@ -1560,10 +1572,10 @@ phase9_validation() {
     fi
     
     # Check display manager
-    if systemctl is-enabled gdm3 &>/dev/null; then
-        log "✓ GDM3 is enabled"
+    if systemctl is-enabled lightdm &>/dev/null; then
+        log "✓ LightDM is enabled"
     else
-        log_error "✗ GDM3 is not enabled"
+        log_error "✗ LightDM is not enabled"
         ((errors++))
     fi
     
@@ -1737,7 +1749,7 @@ main() {
     log "User: $DEVICE_USER"
     log "URL: https://${SERVER_IP}:${SERVER_PORT}?deviceId=${DEVICE_HOSTNAME}"
     log ""
-    log "Display Manager: GDM3 (GNOME/Wayland)"
+    log "Display Manager: LightDM (Openbox/X11)"
     log "Browser: Chromium (native Debian package)"
     log "VPN: Tailscale/Headscale"
     log ""
