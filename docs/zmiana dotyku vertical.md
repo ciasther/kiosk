@@ -17,7 +17,6 @@ przekopiuj to do srodka
 Section "InputClass"
   Identifier "eGalax Touchscreen Calibration"
   MatchProduct "eGalax"
-  MatchDevicePath "/dev/input/event4"
   Driver "evdev"
   Option "TransformationMatrix" "0 1 0 -1 0 1 0 0 1"
 EndSection
@@ -33,6 +32,7 @@ sudo cp ~/.config/monitors.xml /etc/xdg/monitors.xml
 ```bash
 sudo reboot
 ```
+
 
 
 
