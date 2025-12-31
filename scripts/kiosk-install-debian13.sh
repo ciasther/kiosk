@@ -1340,7 +1340,7 @@ phase7_terminal_service() {
     fi
     
     log "Downloading terminal service from GitHub..."
-    if ! git clone -b payment-terminal-service https://github.com/ciasther/kiosk.git /tmp/kiosk-terminal 2>&1 | tee -a "$LOG_FILE"; then
+    if ! git clone -b payment-terminal-service https://github.com/ciasther/Gastro-Kiosk-Pro.git /tmp/kiosk-terminal 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to download terminal service from GitHub"
         log_error "Check internet connection and GitHub repository access"
         return 1
