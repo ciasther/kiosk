@@ -1386,9 +1386,17 @@ phase7_terminal_service() {
         return 1
     fi
     
-    if [ ! -f "$TERMINAL_DIR/src/terminal/client.js" ]; then
+    if [ ! -d "$TERMINAL_DIR/src" ] || [ ! -f "$TERMINAL_DIR/src/terminal/client.js" ]; then
         log_error "PeP protocol files not found - GitHub clone incomplete"
         return 1
+    fi
+    
+    # Verify server.js has integrated heartbeat (no separate heartbeat.js needed)
+    if grep -q "HEARTBEAT.*Device Manager Registration" "$TERMINAL_DIR/server.js"; then
+        log "✓ Terminal service has integrated heartbeat (unified architecture)"
+    else
+        log_warning "⚠ Terminal service may be using old architecture (separate heartbeat.js)"
+        log_warning "  This installation expects integrated heartbeat in server.js"
     fi
     
     log "✓ All terminal service files verified"
@@ -1425,8 +1433,11 @@ EOF
     chown $DEVICE_USER:$DEVICE_USER "$TERMINAL_DIR/.env"
     log "✓ .env configured with TID: $TERMINAL_TID"
     
-    # Skip creating placeholder files - we have real ones from GitHub
-    # Original placeholder code removed - now using full PeP implementation
+    # Using full PeP implementation from GitHub
+    # NOTE: Heartbeat is now integrated into server.js (unified architecture)
+    # No separate heartbeat.js file needed - reduces complexity and points of failure
+    
+    log "Using terminal service from GitHub (PeP protocol + integrated heartbeat)"
     
     # REMOVED: Create simplified server.js (will need full PeP protocol files from admin1)
     # NOW: Using full server.js from GitHub with PeP protocol
@@ -1460,9 +1471,8 @@ TERM_EOF
     # Placeholder code above is kept as comment only
     # heartbeat.js, package.json, .env.template already exist from GitHub
     
-    log "Skipping placeholder file creation - using files from GitHub"
-    
-    # REMOVED: Create heartbeat.js (already in GitHub)
+    # OLD ARCHITECTURE (removed): Separate heartbeat.js file + gastro-terminal-heartbeat.service
+    # NEW ARCHITECTURE: Heartbeat integrated into server.js (unified, like printer-service)
     : <<'HEARTBEAT_EOF'
 const axios = require('axios');
 const os = require('os');
@@ -1550,10 +1560,10 @@ HEARTBEAT_EOF
         return 1
     fi
     
-    log "Creating systemd service for terminal API..."
+    log "Creating systemd service for terminal (with integrated heartbeat)..."
     cat > /etc/systemd/system/gastro-terminal.service <<EOF2
 [Unit]
-Description=Gastro Payment Terminal Service
+Description=Gastro Payment Terminal Service (PeP Protocol + Heartbeat)
 After=network.target tailscaled.service
 
 [Service]
@@ -1571,40 +1581,12 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF2
     
-    log "Creating systemd service for terminal heartbeat..."
-    cat > /etc/systemd/system/gastro-terminal-heartbeat.service <<EOF3
-[Unit]
-Description=Gastro Payment Terminal Heartbeat
-After=network.target tailscaled.service gastro-terminal.service
-
-[Service]
-Type=simple
-User=$DEVICE_USER
-WorkingDirectory=$TERMINAL_DIR
-EnvironmentFile=$TERMINAL_DIR/.env
-Environment="DEVICE_ID=$DEVICE_HOSTNAME"
-Environment="DEVICE_MANAGER_URL=http://100.64.0.7:8090"
-ExecStart=/usr/bin/node heartbeat.js
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF3
-    
     systemctl daemon-reload
     systemctl enable gastro-terminal.service
-    systemctl enable gastro-terminal-heartbeat.service
     
     if ! systemctl start gastro-terminal.service 2>&1 | tee -a "$LOG_FILE"; then
         log_error "Failed to start gastro-terminal.service"
         log_error "Check logs: journalctl -u gastro-terminal.service -n 50"
-        return 1
-    fi
-    
-    if ! systemctl start gastro-terminal-heartbeat.service 2>&1 | tee -a "$LOG_FILE"; then
-        log_error "Failed to start gastro-terminal-heartbeat.service"
-        log_error "Check logs: journalctl -u gastro-terminal-heartbeat.service -n 50"
         return 1
     fi
     
