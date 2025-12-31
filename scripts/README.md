@@ -23,3 +23,8 @@ i tam zamienic 00000000 na wlasciwy TID urządzenia ingenico!
 ```
 01100460
 ```
+ctrl+o > enter > ctrl+x
+
+```bash
+sudo reboot
+```
