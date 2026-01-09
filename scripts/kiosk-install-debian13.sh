@@ -1,15 +1,17 @@
 #!/bin/bash
 ################################################################################
-# Gastro Kiosk Pro - Debian 13 Installation Script v3.0
+# Gastro Kiosk Pro - Debian 13 Installation Script v3.1
 # 
 # Features:
 #   - LightDM + Openbox (minimal kiosk, no GNOME)
 #   - Auto-detection of USB printers with VID/PID injection
 #   - Payment terminal heartbeat (device-manager integration)
+#   - Device Agent for heartbeat (display-only devices)
 #   - Hard restart on timeout (no hanging)
 #   - Python venv for Debian 13 PEP 668 compliance
 #   - Full validation and retry logic
 #   - Polish characters support via bitmap rendering
+#   - Enhanced Tailscale detection (skip if already connected)
 #
 # Requirements:
 #   - Fresh Debian 13 (Trixie)
@@ -19,8 +21,8 @@
 # Usage:
 #   sudo bash kiosk-install-debian13.sh
 #
-# Version: 3.0.0
-# Date: 2025-12-28
+# Version: 3.1.0
+# Date: 2026-01-08
 ################################################################################
 
 set -u  # Exit on undefined variable
@@ -365,6 +367,20 @@ phase1_system_preparation() {
             log_error "Failed to install Python dependencies"
             exit 1
         }
+
+    # Install Node.js (required for printer and terminal services)
+    log "Installing Node.js..."
+    if ! command -v node &>/dev/null; then
+        log "Node.js not found - installing from NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>&1 | tee -a "$LOG_FILE"
+        apt-get install -y -qq nodejs || {
+            log_error "Failed to install Node.js"
+            exit 1
+        }
+        log "✓ Node.js installed: $(node --version)"
+    else
+        log_info "✓ Node.js already installed: $(node --version)"
+    fi
     
     log "Creating user: $DEVICE_USER"
     if ! id "$DEVICE_USER" &>/dev/null; then
@@ -563,8 +579,9 @@ phase3_chromium() {
 phase4_vpn() {
     print_header "PHASE 4: VPN (TAILSCALE/HEADSCALE)"
     
-    log "Installing Tailscale..."
+    log "Checking Tailscale installation..."
     if ! command -v tailscale &>/dev/null; then
+        log "Installing Tailscale..."
         for i in {1..3}; do
             if curl -fsSL https://tailscale.com/install.sh | sh; then
                 log "Tailscale installed successfully"
@@ -579,7 +596,20 @@ phase4_vpn() {
             fi
         done
     else
-        log_info "Tailscale already installed"
+        log_info "✓ Tailscale already installed: $(tailscale version 2>/dev/null | head -1)"
+    fi
+    
+    # Check if already connected to correct network
+    log "Checking existing Tailscale connection..."
+    if systemctl is-active tailscaled &>/dev/null; then
+        if tailscale status 2>/dev/null | grep -q "$SERVER_IP"; then
+            log "✓ Tailscale already connected to correct network"
+            tailscale status | grep "$SERVER_IP" | tee -a "$LOG_FILE"
+            log "Phase 4 completed successfully (using existing connection)"
+            return 0
+        else
+            log_info "Tailscale running but not connected to correct network"
+        fi
     fi
     
     log "Connecting to Headscale server..."
@@ -897,6 +927,7 @@ const app = express();
 const PORT = process.env.PORT || 8083;
 const DEVICE_ID = process.env.DEVICE_ID || os.hostname();
 const DEVICE_MANAGER_URL = process.env.DEVICE_MANAGER_URL || 'http://100.64.0.7:8090';
+const DEVICE_MANAGER_API_KEY = process.env.DEVICE_MANAGER_API_KEY || '';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -922,36 +953,8 @@ function getVpnIp() {
         }
     }
     
-    return 'unknown';
+    return '127.0.0.1';
 }
-
-// Heartbeat to device manager
-setInterval(() => {
-    const ip = getVpnIp();
-    
-    axios.post(`${DEVICE_MANAGER_URL}/heartbeat`, {
-        deviceId: DEVICE_ID,
-        capabilities: { printer: true, printerPort: PORT },
-        ip: ip,
-        hostname: os.hostname()
-    })
-    .then(() => console.log(`[Heartbeat] OK - ${DEVICE_ID} @ ${ip}`))
-    .catch(err => console.error('[Heartbeat] Failed:', err.message));
-}, 30000);
-
-// Send first heartbeat immediately
-setTimeout(() => {
-    const ip = getVpnIp();
-    
-    axios.post(`${DEVICE_MANAGER_URL}/heartbeat`, {
-        deviceId: DEVICE_ID,
-        capabilities: { printer: true, printerPort: PORT },
-        ip: ip,
-        hostname: os.hostname()
-    })
-    .then(() => console.log(`[Heartbeat] Initial OK - ${DEVICE_ID} @ ${ip}`))
-    .catch(err => console.error('[Heartbeat] Initial Failed:', err.message));
-}, 2000);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -1269,6 +1272,7 @@ WorkingDirectory=$PRINTER_DIR
 Environment="PORT=8083"
 Environment="DEVICE_ID=$DEVICE_HOSTNAME"
 Environment="DEVICE_MANAGER_URL=$DEVICE_MANAGER_URL"
+Environment="DEVICE_MANAGER_API_KEY=2i0hsdPcVcZYgRS3NxJGbq7KMw82iHEpepxGQ2/jv08="
 Environment="HOME=/home/$DEVICE_USER"
 ExecStart=/usr/bin/node server.js
 Restart=always
@@ -1318,11 +1322,48 @@ phase7_terminal_service() {
     
     log "Payment terminal detected - installing service..."
     
-    # Use placeholder TID (user will configure later)
-    TERMINAL_TID="00000000"
-    log_warning "Using placeholder TID: $TERMINAL_TID"
-    log_warning "Configure actual TID later in: ~/payment-terminal-service/.env"
-    log_warning "  Terminal: Menu → Zarządzanie → Wizytówka → TID"
+    # Prompt for Terminal TID
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  💳 PAYMENT TERMINAL CONFIGURATION"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Terminal TID (Terminal ID) is required for payment processing."
+    echo ""
+    echo "Where to find TID:"
+    echo "  1. Check label on back/bottom of Ingenico terminal (8 digits)"
+    echo "  2. Terminal Menu: Green dot (.) → System → Terminal Info → TID"
+    echo ""
+    echo "⚠️  WITHOUT VALID TID, CARD PAYMENTS WILL NOT WORK!"
+    echo ""
+    
+    # Read TID with validation
+    while true; do
+        read -p "Enter Terminal TID (8 digits) or press ENTER to skip: " TERMINAL_TID
+        
+        # If empty - use placeholder with strong warning
+        if [ -z "$TERMINAL_TID" ]; then
+            TERMINAL_TID="00000000"
+            log_warning "⚠️  NO TID PROVIDED - Using placeholder: 00000000"
+            log_warning "⚠️  Card payments WILL NOT WORK until you configure TID!"
+            log_warning "⚠️  Edit later: /home/$DEVICE_USER/payment-terminal-service/.env"
+            break
+        fi
+        
+        # Validate: exactly 8 digits
+        if [[ "$TERMINAL_TID" =~ ^[0-9]{8}$ ]]; then
+            log "✓ Terminal TID accepted: $TERMINAL_TID"
+            break
+        else
+            echo ""
+            echo "❌ Invalid TID format!"
+            echo "   TID must be exactly 8 digits (example: 12345678)"
+            echo "   Please try again or press ENTER to skip."
+            echo ""
+        fi
+    done
+    
+    echo ""
     
     log "Installing payment terminal service..."
     log_info "Terminal TID: $TERMINAL_TID"
@@ -1339,23 +1380,9 @@ phase7_terminal_service() {
         log "✓ Git installed successfully"
     fi
     
-    log "Downloading terminal service from GitHub..."
-    if ! git clone -b payment-terminal-service https://github.com/ciasther/Gastro-Kiosk-Pro.git /tmp/kiosk-terminal 2>&1 | tee -a "$LOG_FILE"; then
-        log_error "Failed to download terminal service from GitHub"
-        log_error "Check internet connection and GitHub repository access"
-        return 1
-    fi
-    
-    if [ ! -d "/tmp/kiosk-terminal" ]; then
-        log_error "Terminal service directory not found after clone"
-        return 1
-    fi
-    
-    # Copy files to destination
-    cp -r /tmp/kiosk-terminal "$TERMINAL_DIR"
-    rm -rf /tmp/kiosk-terminal
-    
-    log "✓ Terminal service files downloaded"
+    log "Creating terminal service directory..."
+    mkdir -p "$TERMINAL_DIR"
+    log "✓ Terminal service directory created (requires manual service files)"
     
     # Check if Node.js is already installed (from printer service)
     if ! command -v node &>/dev/null; then
@@ -1375,16 +1402,60 @@ phase7_terminal_service() {
         log_info "Node.js already installed: $(node --version)"
     fi
     
-    # Files already downloaded from GitHub, just ensure directories exist
+    # Clone terminal service from GitHub
+    log "Cloning terminal service from GitHub..."
+    if [ -d "$TERMINAL_DIR/.git" ]; then
+        log_info "Terminal service repository already exists - updating..."
+        cd "$TERMINAL_DIR"
+        
+        # Stash local changes to prevent conflicts
+        if [ -f ".env" ]; then
+            log "Backing up local .env file..."
+            cp .env .env.backup-$(date +%Y%m%d-%H%M%S)
+        fi
+        
+        git stash push -m "Auto-stash before update" 2>&1 | tee -a "$LOG_FILE" || true
+        git pull origin payment-terminal-service 2>&1 | tee -a "$LOG_FILE" || log_warning "Git pull failed, continuing..."
+        git stash pop 2>&1 | tee -a "$LOG_FILE" || log_warning "Could not restore stashed changes"
+    else
+        log "Cloning from: https://github.com/ciasther/Gastro-Kiosk-Pro.git (branch: payment-terminal-service)"
+        if ! git clone -b payment-terminal-service --single-branch --depth 1 \
+            https://github.com/ciasther/Gastro-Kiosk-Pro.git "$TERMINAL_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+            log_error "Failed to clone terminal service from GitHub"
+            log_error "Branch: payment-terminal-service"
+            log_error "Verify branch exists: https://github.com/ciasther/Gastro-Kiosk-Pro/tree/payment-terminal-service"
+            return 1
+        fi
+        log "✓ Terminal service cloned successfully"
+    fi
+    
     mkdir -p "$TERMINAL_DIR/logs"
     
     log "Verifying terminal service files..."
     
-    # Verify critical files exist
-    if [ ! -f "$TERMINAL_DIR/server.js" ]; then
-        log_error "server.js not found - GitHub clone may have failed"
+    # Comprehensive repository integrity check
+    MISSING_FILES=()
+    REQUIRED_FILES=(
+        "server.js"
+        "package.json"
+        "src/terminal/client.js"
+    )
+    
+    for file in "${REQUIRED_FILES[@]}"; do
+        if [ ! -f "$TERMINAL_DIR/$file" ]; then
+            MISSING_FILES+=("$file")
+        fi
+    done
+    
+    if [ ${#MISSING_FILES[@]} -gt 0 ]; then
+        log_error "Incomplete repository - missing files:"
+        printf '  ❌ %s\n' "${MISSING_FILES[@]}"
+        log_error "Branch may be incomplete or corrupted"
+        log_error "Check: https://github.com/ciasther/Gastro-Kiosk-Pro/tree/payment-terminal-service"
         return 1
     fi
+    
+    log "✓ Repository integrity verified (${#REQUIRED_FILES[@]} files checked)"
     
     if [ ! -d "$TERMINAL_DIR/src" ] || [ ! -f "$TERMINAL_DIR/src/terminal/client.js" ]; then
         log_error "PeP protocol files not found - GitHub clone incomplete"
@@ -1416,17 +1487,18 @@ LOCAL_PORT=5000
 TERMINAL_PORT=5010
 
 # Backend URL (VPN)
-BACKEND_URL=http://100.64.0.7:3000
+BACKEND_URL=https://100.64.0.7:3000
 
 # Timeouts (milliseconds)
 PAYMENT_TIMEOUT=60000
 BIND_TIMEOUT=10000
 
 # Terminal IP Address (auto-detected via broadcast, can override if needed)
-TERMINAL_IP=10.42.0.75
+TERMINAL_IP=${TERMINAL_IP:-10.42.0.75}
 
 # Device Manager
 DEVICE_MANAGER_URL=http://100.64.0.7:8090
+DEVICE_MANAGER_API_KEY=2i0hsdPcVcZYgRS3NxJGbq7KMw82iHEpepxGQ2/jv08=
 DEVICE_ID=$DEVICE_HOSTNAME
 EOF
     
@@ -1520,7 +1592,10 @@ async function sendHeartbeat() {
     const response = await axios.post(
       `${DEVICE_MANAGER_URL}/heartbeat`,
       payload,
-      { timeout: 5000 }
+      {
+        headers: { 'x-api-key': DEVICE_MANAGER_API_KEY },
+        timeout: 5000
+      }
     );
     
     console.log(`[Terminal Heartbeat] ✓ Sent: ${DEVICE_ID} @ ${vpnIP}`, response.status);
@@ -1606,8 +1681,8 @@ EOF2
     log "Phase 7 completed successfully"
 }
 
-phase8_cleanup() {
-    print_header "PHASE 8: CLEANUP & OPTIMIZATION"
+phase9_cleanup() {
+    print_header "PHASE 9: CLEANUP & OPTIMIZATION"
     
     log "Cleaning apt cache..."
     apt-get autoremove -y -qq
@@ -1619,8 +1694,8 @@ phase8_cleanup() {
     log "Phase 8 completed successfully"
 }
 
-phase9_validation() {
-    print_header "PHASE 9: VALIDATION"
+phase10_validation() {
+    print_header "PHASE 10: VALIDATION"
     
     log "Running system validation checks..."
     
@@ -1735,6 +1810,66 @@ phase9_validation() {
         ((errors++))
     fi
     
+    # Check Device Agent (if installed)
+    log "Checking Device Agent..."
+    if systemctl list-unit-files | grep -q gastro-device-agent; then
+        if systemctl is-active gastro-device-agent &>/dev/null; then
+            log "✓ Device Agent is running"
+            
+            # Validate .env configuration
+            if [ -f "/opt/gastro-system-v2/device-agent/.env" ]; then
+                API_KEY=$(grep "^DEVICE_MANAGER_API_KEY=" /opt/gastro-system-v2/device-agent/.env 2>/dev/null | cut -d'=' -f2)
+                
+                if [[ -z "$API_KEY" ]]; then
+                    log_error "✗ Device Manager API Key is empty"
+                    ((errors++))
+                elif [[ "$API_KEY" == "your-device-manager-api-key-change-this" ]]; then
+                    log_error "✗ Device Manager API Key is using default placeholder"
+                    ((errors++))
+                else
+                    log "✓ Device Manager API Key is configured"
+                fi
+                
+                # Check file permissions
+                PERM=$(stat -c "%a" /opt/gastro-system-v2/device-agent/.env 2>/dev/null)
+                if [[ "$PERM" != "600" ]]; then
+                    log_warning "⚠ .env permissions are $PERM (should be 600)"
+                    ((warnings++))
+                else
+                    log "✓ .env has secure permissions (600)"
+                fi
+            else
+                log_error "✗ Device Agent .env file not found"
+                ((errors++))
+            fi
+            
+            # Test health endpoint
+            if curl -s -m 5 http://localhost:8084/health 2>/dev/null | grep -q '"status":"ok"'; then
+                log "✓ Device Agent health check passed"
+            else
+                log_warning "⚠ Device Agent health check failed"
+                ((warnings++))
+            fi
+        else
+            log_warning "⚠ Device Agent service is installed but not running"
+            ((warnings++))
+        fi
+    else
+        log_info "Device Agent not installed (using printer/terminal heartbeat)"
+    fi
+    
+    # Check service ports
+    log "Checking service ports..."
+    if ss -tuln 2>/dev/null | grep -q ":8082 "; then
+        log_info "✓ Port 8082 in use (Terminal Service)"
+    fi
+    if ss -tuln 2>/dev/null | grep -q ":8083 "; then
+        log_info "✓ Port 8083 in use (Printer Service)"
+    fi
+    if ss -tuln 2>/dev/null | grep -q ":8084 "; then
+        log_info "✓ Port 8084 in use (Device Agent)"
+    fi
+    
     # Summary
     echo ""
     log "========================================="
@@ -1788,10 +1923,10 @@ main() {
     phase5_kiosk_service
     phase6_printer_service
     phase7_terminal_service
-    phase8_cleanup
+    phase9_cleanup
     
     # Validation
-    if ! phase9_validation; then
+    if ! phase10_validation; then
         log_error "Validation failed. Please check the errors above."
         log_error "You can review the full log at: $LOG_FILE"
         echo ""
