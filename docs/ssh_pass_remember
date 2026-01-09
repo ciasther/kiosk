@@ -7,3 +7,9 @@ ssh-keygen -t ed25519 -C "nazwa"
 ssh-copy-id user@ip
 ```
 podaj haslo aktualne ostatni raz.
+
+
+ewentuane usuwanie tego
+```bash
+rm ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub
+```
