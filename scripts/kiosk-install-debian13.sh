@@ -909,7 +909,11 @@ EOF
     mkdir -p "$PRINTER_DIR"
     
     log "Creating Python virtual environment..."
-    python3 -m venv "$PRINTER_DIR/venv"
+    if [ -d "$PRINTER_DIR/venv" ]; then
+        log_info "Virtual environment already exists - skipping creation"
+    else
+        python3 -m venv "$PRINTER_DIR/venv"
+    fi
     
     log "Installing Python packages in venv..."
     "$PRINTER_DIR/venv/bin/pip" install --upgrade pip --quiet
@@ -956,6 +960,43 @@ function getVpnIp() {
     return '127.0.0.1';
 }
 
+// ============================================================================
+// HEARTBEAT - Device Manager Registration
+// ============================================================================
+async function sendHeartbeat() {
+  try {
+    const vpnIP = getVpnIp();
+    if (!vpnIP || vpnIP === '127.0.0.1') {
+      console.warn('[Printer Heartbeat] Skipping - no VPN IP available');
+      return;
+    }
+    
+    const payload = {
+      deviceId: DEVICE_ID,
+      deviceType: 'printer',
+      vpnIP: vpnIP,
+      status: 'active',
+      timestamp: new Date().toISOString()
+    };
+    
+    const response = await axios.post(
+      `${DEVICE_MANAGER_URL}/api/devices/heartbeat`,
+      payload,
+      {
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': DEVICE_MANAGER_API_KEY 
+        },
+        timeout: 5000
+      }
+    );
+    
+    console.log(`[Printer Heartbeat] ✓ Sent: ${DEVICE_ID} @ ${vpnIP}`, response.status);
+  } catch (err) {
+    console.error('[Printer Heartbeat] ✗ Error:', err.message);
+  }
+}
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'printer', deviceId: DEVICE_ID, timestamp: new Date().toISOString() });
@@ -977,8 +1018,20 @@ app.post('/print', (req, res) => {
   const command = `${printScriptPath} ${scriptPath} '${orderJson.replace(/'/g, "'\\''")}'`;
   
   exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
-    if (error) {
-      console.error(`[${new Date().toISOString()}] Print error:`, stderr);
+    // FIX: Check stdout for SUCCESS instead of error object
+    // Python throws USB Resource busy exception but still prints successfully
+    if (stdout && stdout.includes('SUCCESS')) {
+      console.log(`[${new Date().toISOString()}] Print successful`);
+      return res.json({ 
+        success: true, 
+        message: 'Ticket printed',
+        orderNumber: orderData.orderNumber 
+      });
+    }
+    
+    // Check for explicit FAILED marker
+    if (stderr && stderr.includes('FAILED')) {
+      console.error(`[${new Date().toISOString()}] Print failed:`, stderr);
       return res.status(500).json({ 
         error: 'Print failed', 
         details: stderr,
@@ -986,10 +1039,10 @@ app.post('/print', (req, res) => {
       });
     }
     
-    console.log(`[${new Date().toISOString()}] Print successful: ${stdout}`);
-    res.json({ 
-      success: true, 
-      message: 'Ticket printed',
+    // Fallback: unexpected output
+    console.error(`[${new Date().toISOString()}] Unexpected printer response`, { stdout, stderr });
+    res.status(500).json({ 
+      error: 'Unexpected printer response',
       orderNumber: orderData.orderNumber 
     });
   });
@@ -1014,13 +1067,14 @@ app.post('/test', (req, res) => {
   const command = `${printScriptPath} ${scriptPath} '${orderJson.replace(/'/g, "'\\''")}'`;
   
   exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
-    if (error) {
-      console.error('Test print error:', stderr);
-      return res.status(500).json({ error: 'Test print failed', details: stderr });
+    // Same fix for test endpoint
+    if (stdout && stdout.includes('SUCCESS')) {
+      console.log('Test print successful');
+      return res.json({ success: true, message: 'Test ticket printed' });
     }
     
-    console.log('Test print successful:', stdout);
-    res.json({ success: true, message: 'Test ticket printed' });
+    console.error('Test print error:', stderr);
+    res.status(500).json({ error: 'Test print failed', details: stderr });
   });
 });
 
@@ -1030,6 +1084,15 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`  GET  /health - Health check`);
   console.log(`  POST /print  - Print order ticket`);
   console.log(`  POST /test   - Print test ticket`);
+  console.log('');
+  console.log(`[Printer Heartbeat] Starting for device: ${DEVICE_ID}`);
+  console.log(`[Printer Heartbeat] Device Manager: ${DEVICE_MANAGER_URL}`);
+  
+  // Send initial heartbeat
+  sendHeartbeat();
+  
+  // Send heartbeat every 30 seconds
+  setInterval(sendHeartbeat, 30000);
 });
 NODE_EOF
     
@@ -1046,6 +1109,8 @@ Auto-configured for: VID=$PRINTER_VID PID=$PRINTER_PID
 
 import sys
 import json
+import usb.core
+import usb.util
 from escpos.printer import Usb
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
@@ -1127,6 +1192,20 @@ def format_order_ticket(order_data):
 def print_ticket(order_data):
     """Print ticket with Polish characters and manual centering"""
     try:
+        # FIX: Detach kernel driver BEFORE creating printer object
+        dev = usb.core.find(idVendor=PRINTER_VID, idProduct=PRINTER_PID)
+        if dev is None:
+            raise Exception("Printer device not found")
+        
+        # Try to detach kernel driver
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+                print("Kernel driver detached", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Could not detach kernel driver: {e}", file=sys.stderr)
+        
+        # Now create printer object
         printer = Usb(PRINTER_VID, PRINTER_PID, timeout=5000, in_ep=0x82, out_ep=0x01)
         printer.text('\x1b\x40')
         
@@ -1260,6 +1339,11 @@ JSON_EOF
     fi
     
     log "Creating systemd service..."
+    if systemctl list-unit-files | grep -q "gastro-printer.service"; then
+        log_info "gastro-printer.service already exists - updating..."
+        systemctl stop gastro-printer.service 2>/dev/null || true
+    fi
+    
     cat > /etc/systemd/system/gastro-printer.service <<EOF
 [Unit]
 Description=Gastro Printer Service
@@ -1311,9 +1395,22 @@ EOF
 }
 
 phase7_terminal_service() {
-    print_header "PHASE 7: PAYMENT TERMINAL SERVICE (AUTO-INSTALL)"
+    print_header "PHASE 7: PAYMENT TERMINAL SERVICE (AUTO-INSTALL) [DEPRECATED - MONOREPO]"
     
-    # Auto-install if terminal was detected
+    log_warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_warning "⚠️  PHASE 7 DEPRECATED - MONOREPO ARCHITECTURE"
+    log_warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_warning ""
+    log_warning "Terminal service is now part of monorepo architecture."
+    log_warning "Standalone payment-terminal-service is NO LONGER USED in production."
+    log_warning ""
+    log_warning "This phase is kept for backward compatibility only."
+    log_warning "For new installations, use monorepo deployment instead."
+    log_warning ""
+    log_warning "Skipping Phase 7..."
+    log_warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Auto-skip if terminal was detected
     if [[ "$TERMINAL_DETECTED" != "true" ]]; then
         log "No payment terminal detected - skipping terminal service installation"
         log "Phase 7 skipped"
