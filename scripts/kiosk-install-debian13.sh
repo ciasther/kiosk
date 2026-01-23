@@ -1020,7 +1020,7 @@ app.post('/print', (req, res) => {
   exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
     // FIX: Check stdout for SUCCESS instead of error object
     // Python throws USB Resource busy exception but still prints successfully
-    if (stdout && stdout.includes('SUCCESS')) {
+    if (stdout && (stdout.includes('SUCCESS') || stdout.includes('SUCCESS_WITH_WARNINGS'))) {
       console.log(`[${new Date().toISOString()}] Print successful`);
       return res.json({ 
         success: true, 
@@ -1068,7 +1068,7 @@ app.post('/test', (req, res) => {
   
   exec(command, { timeout: 10000 }, (error, stdout, stderr) => {
     // Same fix for test endpoint
-    if (stdout && stdout.includes('SUCCESS')) {
+    if (stdout && (stdout.includes('SUCCESS') || stdout.includes('SUCCESS_WITH_WARNINGS'))) {
       console.log('Test print successful');
       return res.json({ success: true, message: 'Test ticket printed' });
     }
@@ -1108,6 +1108,7 @@ Auto-configured for: VID=$PRINTER_VID PID=$PRINTER_PID
 """
 
 import sys
+import time
 import json
 import usb.core
 import usb.util
@@ -1191,22 +1192,35 @@ def format_order_ticket(order_data):
 
 def print_ticket(order_data):
     """Print ticket with Polish characters and manual centering"""
+    usb_warnings = []
+    
     try:
-        # FIX: Detach kernel driver BEFORE creating printer object
-        dev = usb.core.find(idVendor=PRINTER_VID, idProduct=PRINTER_PID)
-        if dev is None:
-            raise Exception("Printer device not found")
-        
-        # Try to detach kernel driver
+        # Detach kernel driver (non-blocking)
         try:
-            if dev.is_kernel_driver_active(0):
-                dev.detach_kernel_driver(0)
-                print("Kernel driver detached", file=sys.stderr)
+            dev = usb.core.find(idVendor=PRINTER_VID, idProduct=PRINTER_PID)
+            if dev:
+                if dev.is_kernel_driver_active(0):
+                    dev.detach_kernel_driver(0)
+                    print("Kernel driver detached", file=sys.stderr)
         except Exception as e:
-            print(f"Warning: Could not detach kernel driver: {e}", file=sys.stderr)
+            usb_warnings.append(f"Kernel driver detach warning: {e}")
+            print(f"Warning: {e}", file=sys.stderr)
         
-        # Now create printer object
-        printer = Usb(PRINTER_VID, PRINTER_PID, timeout=5000, in_ep=0x82, out_ep=0x01)
+        # Open printer with retry
+        printer = None
+        last_error = None
+        
+        for attempt in range(2):
+            try:
+                printer = Usb(PRINTER_VID, PRINTER_PID, timeout=5000, in_ep=0x82, out_ep=0x01)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(0.3)
+                    
+        if not printer:
+            raise Exception(f"Failed to open printer after 2 attempts: {last_error}")
         printer.text('\x1b\x40')
         
         # Header
@@ -1268,6 +1282,15 @@ def print_ticket(order_data):
         printer.close()
         
         print("✓ Ticket printed successfully", file=sys.stderr)
+        
+        # Print status based on warnings
+        if usb_warnings:
+            print("SUCCESS_WITH_WARNINGS")
+            for warning in usb_warnings:
+                print(f"  - {warning}", file=sys.stderr)
+        else:
+            print("SUCCESS")
+        
         return True
         
     except Exception as e:
