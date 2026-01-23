@@ -12,7 +12,7 @@ instalacja:
 sudo bash kiosk-install-debian13.sh
 ```
 ```
-c6e65fa87f61e97a0db35329f3462cda081d0e390924c914
+92a7f70bf36fd975cd1163d7ae73bbb8dd6bc4060de5d0e5
 ```
 
 zmiana TID terminala:
