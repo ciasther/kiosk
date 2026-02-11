@@ -1,4 +1,4 @@
-## Najpierw sprawdź tryb (Wayland/X11)
+## Najpierw sprawdź tryb obrazu (Wayland/X11)
 
 ```bash
 echo $XDG_SESSION_TYPE
@@ -12,7 +12,7 @@ Pokaże `wayland` albo `x11`.
 ```bash
 gnome-control-center display
 ```
-Otwórz „Orientacja” i ustaw pionowo.
+Otwórz „Orientacja” i ustaw pionowo - to ustawi sam ekran.
 
 ```bash
 sudo tee /etc/udev/rules.d/99-touch-rotate.rules >/dev/null <<'EOF'
